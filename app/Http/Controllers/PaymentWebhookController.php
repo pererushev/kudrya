@@ -13,7 +13,7 @@ class PaymentWebhookController extends Controller
     {
         $this->verifySignature($request);
 
-        $result = $payments->handlePaidWebhook($request->validated());
+        $result = $payments->handleWebhook($request->validated());
 
         return response()->json($result);
     }

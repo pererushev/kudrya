@@ -2,14 +2,14 @@
 
 namespace App\Providers\DigitalGoods;
 
+use App\Domain\KeyPool;
 use App\Enums\ProviderName;
 use App\Models\ProviderIssuance;
-use Illuminate\Support\Str;
 
 class ChaosDigitalGoodsProvider implements DigitalGoodsProvider
 {
     /**
-     * Forced fulfill outcomes for tests: issued|failed|timeout.
+     * Forced fulfill outcomes for tests: issued|failed|timeout|out_of_stock.
      *
      * @var list<string>
      */
@@ -20,6 +20,7 @@ class ChaosDigitalGoodsProvider implements DigitalGoodsProvider
         private readonly float $failRate,
         private readonly float $timeoutRate,
         private readonly bool $chaosEnabled,
+        private readonly KeyPool $keys,
     ) {}
 
     public static function forceNext(?string $outcome): void
@@ -40,10 +41,10 @@ class ChaosDigitalGoodsProvider implements DigitalGoodsProvider
         return $this->name;
     }
 
-    public function fulfill(string $idempotencyKey, string $sku): ProviderResult
+    public function fulfill(string $requestId, string $sku, string $orderId): ProviderResult
     {
         $existing = ProviderIssuance::query()
-            ->where('idempotency_key', $idempotencyKey)
+            ->where('idempotency_key', $requestId)
             ->first();
 
         if ($existing !== null) {
@@ -51,17 +52,25 @@ class ChaosDigitalGoodsProvider implements DigitalGoodsProvider
         }
 
         $outcome = $this->decideOutcome();
-        $code = $outcome === 'failed'
-            ? null
-            : sprintf('%s-%s-%s', strtoupper($this->name->value), strtoupper($sku), Str::upper(Str::random(12)));
-        $status = $outcome === 'failed' ? 'failed' : 'issued';
+
+        if ($outcome === 'failed' || $outcome === 'out_of_stock') {
+            $reason = $outcome === 'out_of_stock' ? 'out_of_stock' : 'provider_rejected';
+
+            return ProviderResult::failed($reason);
+        }
+
+        $code = $this->keys->allocate($orderId, $requestId, $this->name);
+
+        if ($code === null) {
+            return ProviderResult::failed('out_of_stock');
+        }
 
         $now = now();
         $inserted = ProviderIssuance::query()->insertOrIgnore([
             [
                 'provider' => $this->name->value,
-                'idempotency_key' => $idempotencyKey,
-                'status' => $status,
+                'idempotency_key' => $requestId,
+                'status' => 'issued',
                 'code' => $code,
                 'created_at' => $now,
                 'updated_at' => $now,
@@ -69,7 +78,7 @@ class ChaosDigitalGoodsProvider implements DigitalGoodsProvider
         ]);
 
         $stored = ProviderIssuance::query()
-            ->where('idempotency_key', $idempotencyKey)
+            ->where('idempotency_key', $requestId)
             ->firstOrFail();
 
         if ($inserted === 0) {
@@ -77,16 +86,16 @@ class ChaosDigitalGoodsProvider implements DigitalGoodsProvider
         }
 
         if ($outcome === 'timeout') {
-            throw new ProviderTimeoutException($this->name, $idempotencyKey);
+            throw new ProviderTimeoutException($this->name, $requestId);
         }
 
         return $this->fromIssuance($stored);
     }
 
-    public function fetchStatus(string $idempotencyKey): ProviderResult
+    public function fetchStatus(string $requestId): ProviderResult
     {
         $existing = ProviderIssuance::query()
-            ->where('idempotency_key', $idempotencyKey)
+            ->where('idempotency_key', $requestId)
             ->first();
 
         if ($existing === null) {
@@ -130,6 +139,8 @@ class ChaosDigitalGoodsProvider implements DigitalGoodsProvider
             return ProviderResult::issued($issuance->code);
         }
 
-        return ProviderResult::failed('provider_rejected');
+        $reason = $issuance->status === 'out_of_stock' ? 'out_of_stock' : 'provider_rejected';
+
+        return ProviderResult::failed($reason);
     }
 }

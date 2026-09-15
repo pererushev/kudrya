@@ -16,8 +16,8 @@ class ReconciliationTest extends TestCase
         $this->seedProduct();
         Bus::fake([FulfillOrder::class]);
 
-        $order = $this->postJson('/api/orders', ['sku' => 'STEAM-CS2-KEY'])->json();
-        $this->postJson('/api/webhooks/payment', $this->paidPayload($order['id'], 1499))->assertOk();
+        $order = $this->postJson('/api/orders', ['sku' => 'STEAM-TOPUP-500'])->json();
+        $this->postJson('/api/webhooks/payment', $this->paidPayload($order['id']))->assertOk();
 
         $this->assertSame(OrderStatus::Paid->value, $this->getJson('/api/orders/'.$order['id'])->json('status'));
 
@@ -34,8 +34,8 @@ class ReconciliationTest extends TestCase
         $this->seedProduct();
         Bus::fake([FulfillOrder::class]);
 
-        $order = $this->postJson('/api/orders', ['sku' => 'STEAM-CS2-KEY'])->json();
-        $this->postJson('/api/webhooks/payment', $this->paidPayload($order['id'], 1499))->assertOk();
+        $order = $this->postJson('/api/orders', ['sku' => 'STEAM-TOPUP-500'])->json();
+        $this->postJson('/api/webhooks/payment', $this->paidPayload($order['id']))->assertOk();
 
         app(FulfillmentService::class)->fulfill($order['id']);
 

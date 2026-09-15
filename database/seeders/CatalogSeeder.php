@@ -3,6 +3,7 @@
 namespace Database\Seeders;
 
 use App\Models\Category;
+use App\Models\DigitalKey;
 use App\Models\Product;
 use Illuminate\Database\Seeder;
 use Illuminate\Support\Facades\DB;
@@ -15,6 +16,8 @@ class CatalogSeeder extends Seeder
             ['slug' => 'steam', 'name' => 'Steam'],
             ['slug' => 'playstation', 'name' => 'PlayStation'],
             ['slug' => 'xbox', 'name' => 'Xbox'],
+            ['slug' => 'subscriptions', 'name' => 'Subscriptions'],
+            ['slug' => 'giftcards', 'name' => 'Gift cards'],
             ['slug' => 'nintendo', 'name' => 'Nintendo'],
             ['slug' => 'mobile', 'name' => 'Mobile'],
         ];
@@ -24,30 +27,40 @@ class CatalogSeeder extends Seeder
         }
 
         $bySlug = Category::query()->pluck('id', 'slug');
+        $keyCount = count(require database_path('data/digital_keys.php'));
 
-        Product::query()->updateOrCreate(
-            ['sku' => 'STEAM-CS2-KEY'],
-            [
-                'title' => 'Counter-Strike 2 Prime Key',
-                'category_id' => $bySlug['steam'],
-                'sort_rank' => 10_000,
-                'price_cents' => 1499,
-                'stock_qty' => 50,
-                'is_available' => true,
-            ],
-        );
+        $featured = [
+            ['sku' => 'STEAM-TOPUP-500', 'title' => 'Пополнение Steam 500 ₽', 'category' => 'steam', 'rank' => 12_000, 'price' => 500],
+            ['sku' => 'STEAM-TOPUP-1000', 'title' => 'Пополнение Steam 1000 ₽', 'category' => 'steam', 'rank' => 11_500, 'price' => 1000],
+            ['sku' => 'STEAM-TOPUP-2500', 'title' => 'Пополнение Steam 2500 ₽', 'category' => 'steam', 'rank' => 11_000, 'price' => 2500],
+            ['sku' => 'KEY-CS2-PRIME', 'title' => 'CS2 Prime Status ключ', 'category' => 'steam', 'rank' => 10_500, 'price' => 1290],
+            ['sku' => 'KEY-GTA5', 'title' => 'GTA V ключ активации', 'category' => 'steam', 'rank' => 10_000, 'price' => 1990],
+            ['sku' => 'KEY-EFT', 'title' => 'Escape from Tarkov ключ', 'category' => 'steam', 'rank' => 9_500, 'price' => 3490],
+            ['sku' => 'SUB-DISCORD-1M', 'title' => 'Discord Nitro 1 месяц', 'category' => 'subscriptions', 'rank' => 9_000, 'price' => 399],
+            ['sku' => 'SUB-YT-3M', 'title' => 'YouTube Premium 3 месяца', 'category' => 'subscriptions', 'rank' => 8_500, 'price' => 1490],
+            ['sku' => 'SUB-SPOTIFY-1M', 'title' => 'Spotify Premium 1 месяц', 'category' => 'subscriptions', 'rank' => 8_000, 'price' => 299],
+            ['sku' => 'GIFT-PSN-1000', 'title' => 'PlayStation Store карта 1000 ₽', 'category' => 'playstation', 'rank' => 7_500, 'price' => 1000],
+            ['sku' => 'GIFT-XBOX-1500', 'title' => 'Xbox Gift Card 1500 ₽', 'category' => 'xbox', 'rank' => 7_000, 'price' => 1500],
+            ['sku' => 'GIFT-ROBLOX-800', 'title' => 'Roblox 800 Robux', 'category' => 'giftcards', 'rank' => 6_500, 'price' => 890],
+        ];
 
-        Product::query()->updateOrCreate(
-            ['sku' => 'PSN-20-EUR'],
-            [
-                'title' => 'PlayStation Store 20 EUR',
-                'category_id' => $bySlug['playstation'],
-                'sort_rank' => 9_000,
-                'price_cents' => 2000,
-                'stock_qty' => 25,
-                'is_available' => true,
-            ],
-        );
+        foreach ($featured as $row) {
+            Product::query()->updateOrCreate(
+                ['sku' => $row['sku']],
+                [
+                    'title' => $row['title'],
+                    'category_id' => $bySlug[$row['category']],
+                    'sort_rank' => $row['rank'],
+                    'price_cents' => $row['price'] * 100,
+                    'stock_qty' => $keyCount,
+                    'is_available' => true,
+                ],
+            );
+        }
+
+        foreach (require database_path('data/digital_keys.php') as $code) {
+            DigitalKey::query()->updateOrCreate(['code' => $code], ['code' => $code]);
+        }
 
         if (Product::query()->count() >= 5000) {
             return;

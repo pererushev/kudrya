@@ -28,7 +28,7 @@ class OrderService
             'product_id' => $product->id,
             'sku' => $product->sku,
             'amount_cents' => $product->price_cents,
-            'status' => OrderStatus::PendingPayment,
+            'status' => OrderStatus::Created,
         ]);
     }
 }

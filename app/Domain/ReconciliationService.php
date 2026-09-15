@@ -23,7 +23,12 @@ class ReconciliationService
     public function report(): array
     {
         $paidNotDelivered = Order::query()
-            ->whereIn('status', [OrderStatus::Paid, OrderStatus::Fulfilling, OrderStatus::Failed])
+            ->whereIn('status', [
+                OrderStatus::Paid,
+                OrderStatus::Delivering,
+                OrderStatus::OutOfStock,
+                OrderStatus::DeliveryFailed,
+            ])
             ->whereDoesntHave('fulfillment', fn ($q) => $q->where('status', FulfillmentStatus::Succeeded))
             ->get(['id', 'sku', 'status', 'amount_cents', 'updated_at'])
             ->map(fn (Order $order) => [
@@ -71,7 +76,12 @@ class ReconciliationService
         $stuckAfter = (int) config('commerce.fulfillment.stuck_after_seconds');
 
         $stuck = Order::query()
-            ->whereIn('status', [OrderStatus::Paid, OrderStatus::Fulfilling])
+            ->whereIn('status', [
+                OrderStatus::Paid,
+                OrderStatus::Delivering,
+                OrderStatus::OutOfStock,
+                OrderStatus::DeliveryFailed,
+            ])
             ->where('updated_at', '<=', now()->subSeconds($stuckAfter))
             ->get(['id', 'sku', 'status', 'updated_at'])
             ->map(fn (Order $order) => [
@@ -99,7 +109,12 @@ class ReconciliationService
         $stuckAfter = (int) config('commerce.fulfillment.stuck_after_seconds');
 
         $ids = Order::query()
-            ->whereIn('status', [OrderStatus::Paid, OrderStatus::Fulfilling])
+            ->whereIn('status', [
+                OrderStatus::Paid,
+                OrderStatus::Delivering,
+                OrderStatus::OutOfStock,
+                OrderStatus::DeliveryFailed,
+            ])
             ->where('updated_at', '<=', now()->subSeconds($stuckAfter))
             ->pluck('id')
             ->all();

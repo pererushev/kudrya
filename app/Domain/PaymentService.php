@@ -8,7 +8,9 @@ use App\Models\Order;
 use App\Models\PaymentEvent;
 use App\Support\CommerceLog;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 use Illuminate\Validation\ValidationException;
+use Symfony\Component\HttpKernel\Exception\HttpException;
 
 class PaymentService
 {
@@ -18,21 +20,26 @@ class PaymentService
     ) {}
 
     /**
-     * @param  array{event_id: string, order_id: string, amount_cents: int, status: string}  $payload
+     * @param  array<string, mixed>  $payload
      * @return array{ok: bool, duplicate: bool}
      */
-    public function handlePaidWebhook(array $payload): array
+    public function handleWebhook(array $payload): array
     {
-        if (($payload['status'] ?? '') !== 'paid') {
+        $status = (string) ($payload['status'] ?? '');
+        if (! in_array($status, ['paid', 'failed'], true)) {
             throw ValidationException::withMessages([
-                'status' => 'Only paid webhooks are accepted.',
+                'status' => 'status must be paid or failed.',
             ]);
         }
 
         $dispatch = false;
         $duplicate = false;
 
-        DB::transaction(function () use ($payload, &$dispatch, &$duplicate): void {
+        DB::transaction(function () use ($payload, $status, &$dispatch, &$duplicate): void {
+            if (! Str::isUuid((string) $payload['order_id'])) {
+                throw new HttpException(503, 'Order not found.');
+            }
+
             /** @var Order|null $order */
             $order = Order::query()
                 ->where('id', $payload['order_id'])
@@ -40,15 +47,22 @@ class PaymentService
                 ->first();
 
             if ($order === null) {
-                throw ValidationException::withMessages([
-                    'order_id' => 'Order not found.',
-                ]);
+                throw new HttpException(503, 'Order not found.');
             }
 
-            if ($order->amount_cents !== (int) $payload['amount_cents']) {
-                throw ValidationException::withMessages([
-                    'amount_cents' => 'Amount does not match the order.',
-                ]);
+            $amountCents = $this->amountCents($payload);
+
+            if ($status === 'paid') {
+                if ($amountCents === null) {
+                    throw ValidationException::withMessages([
+                        'amount' => 'amount or amount_cents is required.',
+                    ]);
+                }
+                if ($order->amount_cents !== $amountCents) {
+                    throw ValidationException::withMessages([
+                        'amount' => 'Amount does not match the order.',
+                    ]);
+                }
             }
 
             $now = now();
@@ -56,8 +70,8 @@ class PaymentService
                 [
                     'event_id' => $payload['event_id'],
                     'order_id' => $order->id,
-                    'amount_cents' => $payload['amount_cents'],
-                    'status' => $payload['status'],
+                    'amount_cents' => $amountCents ?? $order->amount_cents,
+                    'status' => $status,
                     'payload' => json_encode($payload),
                     'received_at' => $now,
                     'created_at' => $now,
@@ -76,7 +90,29 @@ class PaymentService
                 return;
             }
 
-            if ($order->status !== OrderStatus::PendingPayment) {
+            if ($status === 'failed') {
+                if ($order->status === OrderStatus::Created) {
+                    $this->stateMachine->transition($order, OrderStatus::PaymentFailed, 'payment_failed');
+                    CommerceLog::event('payment_failed', [
+                        'event_id' => $payload['event_id'],
+                        'order_id' => $order->id,
+                        'outcome' => 'payment_failed',
+                    ]);
+                } else {
+                    $duplicate = true;
+                    CommerceLog::event('ignored_failed_webhook', [
+                        'event_id' => $payload['event_id'],
+                        'order_id' => $order->id,
+                        'status' => $order->status->value,
+                        'outcome' => 'ignored_failed_webhook',
+                    ]);
+                }
+
+                return;
+            }
+
+            if ($order->status === OrderStatus::Delivered
+                || $order->status->isPaidNotDelivered()) {
                 $duplicate = true;
                 CommerceLog::event('duplicate_payment_for_order', [
                     'event_id' => $payload['event_id'],
@@ -84,6 +120,26 @@ class PaymentService
                     'status' => $order->status->value,
                     'outcome' => 'duplicate_webhook',
                 ]);
+
+                return;
+            }
+
+            if ($order->status === OrderStatus::PaymentFailed) {
+                $this->stateMachine->transition($order, OrderStatus::Paid);
+                $this->ledger->recordPayment($order);
+                $dispatch = true;
+                CommerceLog::event('paid', [
+                    'event_id' => $payload['event_id'],
+                    'order_id' => $order->id,
+                    'amount_cents' => $order->amount_cents,
+                    'outcome' => 'paid_after_failed',
+                ]);
+
+                return;
+            }
+
+            if ($order->status !== OrderStatus::Created) {
+                $duplicate = true;
 
                 return;
             }
@@ -105,5 +161,21 @@ class PaymentService
         }
 
         return ['ok' => true, 'duplicate' => $duplicate];
+    }
+
+    /**
+     * @param  array<string, mixed>  $payload
+     */
+    private function amountCents(array $payload): ?int
+    {
+        if (array_key_exists('amount', $payload) && $payload['amount'] !== null && $payload['amount'] !== '') {
+            return (int) round(((float) $payload['amount']) * 100);
+        }
+
+        if (array_key_exists('amount_cents', $payload) && $payload['amount_cents'] !== null && $payload['amount_cents'] !== '') {
+            return (int) $payload['amount_cents'];
+        }
+
+        return null;
     }
 }

@@ -10,13 +10,16 @@
  * Usage:
  *   php artisan serve
  *   php scripts/race_webhook.php
- *   php scripts/race_webhook.php --base=http://127.0.0.1:8000 --concurrency=20 --sku=STEAM-CS2-KEY
+ *   php scripts/race_webhook.php --base=http://127.0.0.1:8000 --concurrency=50 --sku=STEAM-TOPUP-500
+ *
+ * Fallback (provider A 5xx → B):
+ *   PROVIDER_CHAOS=true php artisan serve
+ *   php scripts/race_webhook.php --concurrency=1
  */
-
 $opts = getopt('', ['base::', 'concurrency::', 'sku::', 'mode::']);
 $base = rtrim($opts['base'] ?? getenv('APP_URL') ?: 'http://127.0.0.1:8000', '/');
-$concurrency = max(2, (int) ($opts['concurrency'] ?? 20));
-$sku = $opts['sku'] ?? 'STEAM-CS2-KEY';
+$concurrency = max(2, (int) ($opts['concurrency'] ?? 50));
+$sku = $opts['sku'] ?? 'STEAM-TOPUP-500';
 $mode = $opts['mode'] ?? 'same-event'; // same-event | distinct-events
 
 function http_json(string $method, string $url, ?array $body = null): array
@@ -90,6 +93,18 @@ function fail(string $message): never
     exit(1);
 }
 
+function paid_payload(string $eventId, string $orderId, int $amountRubles): array
+{
+    return [
+        'event_id' => $eventId,
+        'order_id' => $orderId,
+        'status' => 'paid',
+        'amount' => $amountRubles,
+        'currency' => 'RUB',
+        'created_at' => gmdate('Y-m-d\TH:i:s\Z'),
+    ];
+}
+
 echo "Base: {$base}\nSKU: {$sku}\nConcurrency: {$concurrency}\nMode: {$mode}\n";
 
 $created = http_json('POST', $base.'/api/orders', ['sku' => $sku]);
@@ -98,8 +113,8 @@ if ($created['status'] !== 201) {
 }
 
 $orderId = $created['body']['id'] ?? null;
-$amount = $created['body']['amount_cents'] ?? null;
-if (! $orderId || ! $amount) {
+$amount = $created['body']['amount'] ?? null;
+if (! $orderId || $amount === null) {
     fail('create order returned no id/amount');
 }
 
@@ -108,22 +123,11 @@ echo "Order: {$orderId}\n";
 $payloads = [];
 if ($mode === 'distinct-events') {
     for ($i = 0; $i < $concurrency; $i++) {
-        $payloads[] = [
-            'event_id' => 'evt-race-'.bin2hex(random_bytes(8))."-{$i}",
-            'order_id' => $orderId,
-            'amount_cents' => $amount,
-            'status' => 'paid',
-        ];
+        $payloads[] = paid_payload('evt-race-'.bin2hex(random_bytes(8))."-{$i}", $orderId, (int) $amount);
     }
 } else {
     $eventId = 'evt-race-'.bin2hex(random_bytes(8));
-    $payload = [
-        'event_id' => $eventId,
-        'order_id' => $orderId,
-        'amount_cents' => $amount,
-        'status' => 'paid',
-    ];
-    $payloads = array_fill(0, $concurrency, $payload);
+    $payloads = array_fill(0, $concurrency, paid_payload($eventId, $orderId, (int) $amount));
 }
 
 $results = http_multi_post($base.'/api/webhooks/payment', $payloads);
@@ -147,8 +151,8 @@ $order = $fetched['body'];
 
 echo "Webhook OK: {$ok}, duplicates flagged: {$duplicates}\n";
 echo "Status: {$order['status']}\n";
-echo "Code: ".($order['code'] ?? 'null')."\n";
-echo "Provider: ".($order['provider'] ?? 'null')."\n";
+echo 'Code: '.($order['code'] ?? 'null')."\n";
+echo 'Provider: '.($order['provider'] ?? 'null')."\n";
 
 if (($order['status'] ?? '') !== 'delivered') {
     fail('expected delivered, got '.($order['status'] ?? 'null'));

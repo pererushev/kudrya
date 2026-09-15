@@ -8,7 +8,7 @@ interface DigitalGoodsProvider
 {
     public function name(): ProviderName;
 
-    public function fulfill(string $idempotencyKey, string $sku): ProviderResult;
+    public function fulfill(string $requestId, string $sku, string $orderId): ProviderResult;
 
-    public function fetchStatus(string $idempotencyKey): ProviderResult;
+    public function fetchStatus(string $requestId): ProviderResult;
 }

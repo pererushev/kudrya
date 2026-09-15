@@ -42,7 +42,7 @@ class FulfillmentService
         }
 
         if ($fulfillment->status === FulfillmentStatus::Unknown && $fulfillment->provider !== null) {
-            $this->resolveUnknown($order, $fulfillment, $fulfillment->provider);
+            $this->retrySameRequest($order, $fulfillment, $fulfillment->provider);
 
             return;
         }
@@ -67,19 +67,16 @@ class FulfillmentService
                 return null;
             }
 
-            if ($order->status === OrderStatus::PendingPayment) {
+            if (in_array($order->status, [OrderStatus::Created, OrderStatus::PaymentFailed], true)) {
                 return null;
             }
 
             if ($order->status === OrderStatus::Paid) {
-                $this->stateMachine->transition($order, OrderStatus::Fulfilling);
+                $this->stateMachine->transition($order, OrderStatus::Delivering);
             }
 
-            if ($order->status === OrderStatus::Failed) {
-                $this->stateMachine->transition($order, OrderStatus::Fulfilling);
-                $order->failure_reason = null;
-                $order->failed_at = null;
-                $order->save();
+            if (in_array($order->status, [OrderStatus::OutOfStock, OrderStatus::DeliveryFailed], true)) {
+                $this->stateMachine->transition($order, OrderStatus::Delivering);
             }
 
             $now = now();
@@ -134,68 +131,70 @@ class FulfillmentService
 
     private function tryProvider(Order $order, Fulfillment $fulfillment, ProviderName $provider): void
     {
-        $key = $provider->idempotencyKey($order->id);
+        $key = $provider->requestId($order->id);
 
         $fulfillment->provider = $provider;
         $fulfillment->idempotency_key = $key;
         $fulfillment->status = FulfillmentStatus::Pending;
         $fulfillment->save();
 
-        $client = $this->providers->get($provider);
-
-        try {
-            $result = $client->fulfill($key, $order->sku);
-        } catch (ProviderTimeoutException $e) {
-            CommerceLog::event('timeout', [
-                'order_id' => $order->id,
-                'provider' => $provider->value,
-                'idempotency_key' => $key,
-                'outcome' => 'timeout',
-            ]);
-
-            $fulfillment->status = FulfillmentStatus::Unknown;
-            $fulfillment->last_error = $e->getMessage();
-            $fulfillment->save();
-
-            $this->resolveUnknown($order, $fulfillment, $provider);
-
-            return;
-        }
-
-        $this->applyResult($order, $fulfillment, $provider, $result);
+        $this->callWithRetries($order, $fulfillment, $provider, $key);
     }
 
-    private function resolveUnknown(Order $order, Fulfillment $fulfillment, ProviderName $provider): void
+    private function retrySameRequest(Order $order, Fulfillment $fulfillment, ProviderName $provider): void
     {
-        $key = $provider->idempotencyKey($order->id);
-        $attempts = (int) config('commerce.fulfillment.status_attempts');
-        $backoffMs = (int) config('commerce.fulfillment.status_backoff_ms');
-        $client = $this->providers->get($provider);
+        $key = $fulfillment->idempotency_key ?? $provider->requestId($order->id);
+        $this->callWithRetries($order, $fulfillment, $provider, $key);
+    }
 
-        $result = ProviderResult::notFound();
+    private function callWithRetries(
+        Order $order,
+        Fulfillment $fulfillment,
+        ProviderName $provider,
+        string $requestId,
+    ): void {
+        $client = $this->providers->get($provider);
+        $attempts = max(1, (int) config('commerce.fulfillment.issue_attempts'));
+        $backoffMs = (int) config('commerce.fulfillment.issue_backoff_ms');
 
         for ($i = 0; $i < $attempts; $i++) {
             if ($i > 0 && $backoffMs > 0) {
                 usleep($backoffMs * 1000 * (2 ** ($i - 1)));
             }
 
-            $result = $client->fetchStatus($key);
+            try {
+                $result = $client->fulfill($requestId, $order->sku, $order->id);
+                $this->applyResult($order, $fulfillment, $provider, $result);
 
-            CommerceLog::event('status_checked', [
-                'order_id' => $order->id,
-                'provider' => $provider->value,
-                'idempotency_key' => $key,
-                'provider_outcome' => $result->outcome,
-                'attempt' => $i + 1,
-                'outcome' => 'status_checked',
-            ]);
+                return;
+            } catch (ProviderTimeoutException $e) {
+                CommerceLog::event('timeout', [
+                    'order_id' => $order->id,
+                    'provider' => $provider->value,
+                    'request_id' => $requestId,
+                    'attempt' => $i + 1,
+                    'outcome' => 'timeout',
+                ]);
 
-            if (! $result->isNotFound()) {
-                break;
+                $fulfillment->status = FulfillmentStatus::Unknown;
+                $fulfillment->last_error = $e->getMessage();
+                $fulfillment->save();
+
+                $status = $client->fetchStatus($requestId);
+                if ($status->isIssued() || $status->isFailed()) {
+                    $this->applyResult($order, $fulfillment, $provider, $status);
+
+                    return;
+                }
             }
         }
 
-        $this->applyResult($order, $fulfillment, $provider, $result);
+        CommerceLog::event('timeout_unresolved', [
+            'order_id' => $order->id,
+            'provider' => $provider->value,
+            'request_id' => $requestId,
+            'outcome' => 'timeout_unresolved',
+        ]);
     }
 
     private function applyResult(Order $order, Fulfillment $fulfillment, ProviderName $provider, ProviderResult $result): void
@@ -206,7 +205,7 @@ class FulfillmentService
             return;
         }
 
-        if ($result->isFailed() || $result->isNotFound()) {
+        if ($result->isFailed()) {
             $fallback = $provider->fallback();
 
             if ($fallback !== null) {
@@ -214,7 +213,7 @@ class FulfillmentService
                     'order_id' => $order->id,
                     'from' => $provider->value,
                     'to' => $fallback->value,
-                    'reason' => $result->outcome,
+                    'reason' => $result->error,
                     'outcome' => 'fallback',
                 ]);
 
@@ -222,9 +221,9 @@ class FulfillmentService
 
                 return;
             }
-        }
 
-        $this->failOrder($order, $fulfillment, $result->error ?? 'provider_exhausted');
+            $this->failOrder($order, $fulfillment, $result->error ?? 'provider_exhausted');
+        }
     }
 
     private function completeDelivery(Order $order, Fulfillment $fulfillment, string $code): void
@@ -254,9 +253,12 @@ class FulfillmentService
 
             if ($order->status !== OrderStatus::Delivered) {
                 if ($order->status === OrderStatus::Paid) {
-                    $this->stateMachine->transition($order, OrderStatus::Fulfilling);
+                    $this->stateMachine->transition($order, OrderStatus::Delivering);
                 }
-                if ($order->status === OrderStatus::Fulfilling) {
+                if (in_array($order->status, [OrderStatus::OutOfStock, OrderStatus::DeliveryFailed], true)) {
+                    $this->stateMachine->transition($order, OrderStatus::Delivering);
+                }
+                if ($order->status === OrderStatus::Delivering) {
                     $this->stateMachine->transition($order, OrderStatus::Delivered);
                 }
             }
@@ -266,7 +268,7 @@ class FulfillmentService
             CommerceLog::event('delivered', [
                 'order_id' => $order->id,
                 'provider' => $fulfillment->provider?->value,
-                'idempotency_key' => $fulfillment->idempotency_key,
+                'request_id' => $fulfillment->idempotency_key,
                 'outcome' => 'delivered',
             ]);
         });
@@ -288,16 +290,24 @@ class FulfillmentService
             $fulfillment->last_error = $reason;
             $fulfillment->save();
 
-            if ($order->status === OrderStatus::Fulfilling) {
-                $this->stateMachine->transition($order, OrderStatus::Failed, $reason);
+            $to = $reason === 'out_of_stock'
+                ? OrderStatus::OutOfStock
+                : OrderStatus::DeliveryFailed;
+
+            if ($order->status === OrderStatus::Paid) {
+                $this->stateMachine->transition($order, OrderStatus::Delivering);
+            }
+
+            if ($order->status === OrderStatus::Delivering) {
+                $this->stateMachine->transition($order, $to, $reason);
             }
 
             CommerceLog::event('fulfill_failed', [
                 'order_id' => $order->id,
                 'provider' => $fulfillment->provider?->value,
-                'idempotency_key' => $fulfillment->idempotency_key,
+                'request_id' => $fulfillment->idempotency_key,
                 'reason' => $reason,
-                'outcome' => 'failed',
+                'outcome' => $to->value,
             ]);
         });
     }

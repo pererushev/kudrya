@@ -35,5 +35,6 @@
         <env name="TELESCOPE_ENABLED" value="false"/>
         <env name="PROVIDER_CHAOS" value="false" force="true"/>
         <env name="PROVIDER_STATUS_BACKOFF_MS" value="1" force="true"/>
+        <env name="PROVIDER_ISSUE_BACKOFF_MS" value="1" force="true"/>
     </php>
 </phpunit>

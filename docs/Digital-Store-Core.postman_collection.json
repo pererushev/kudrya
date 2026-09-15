@@ -1,0 +1,623 @@
+{
+  "info": {
+    "_postman_id": "a7c3e1d0-4b92-4f18-9e6a-0c1d2e3f4a5b",
+    "name": "Digital Store Core",
+    "description": "REST API ядра магазина цифровых товаров (GGSel-like).\n\nПоток: витрина → создать заказ по SKU → вебхук оплаты → авто-выдача кода.\n\nСтатусы заказа: `created` → `paid` → `fulfilling` → `delivered` | `failed`.\n\nКод (`code`) отдаётся только в статусе `delivered`.\n\n## Импорт\n1. Postman → Import → этот файл.\n2. Выберите окружение **Digital Store Core — local** (`docs/local.postman_environment.json`) или оставьте переменные коллекции.\n3. `php artisan serve` (по умолчанию `http://127.0.0.1:8000`).\n\n## Переменные\n| Имя | Назначение |\n|---|---|\n| `baseUrl` | Базовый URL без `/api` |\n| `sku` | SKU из сида, по умолчанию `STEAM-TOPUP-500` (1499¢) |\n| `orderId` | UUID заказа (заполняется тестом после Create) |\n| `amountCents` | Сумма заказа (заполняется после Create) |\n| `eventId` | Идемпотентный id события оплаты |\n| `webhookSecret` | `PAYMENT_WEBHOOK_SECRET`; пусто = подпись не нужна |\n\nПапка **Happy path** рассчитана на Collection Runner: Create → Pay → Get.\n\nПовтор вебхука с тем же `event_id`: HTTP 200, `{ ok: true, duplicate: true }`, без второй выдачи.\nОпционально `X-Signature: HMAC-SHA256(raw body, webhookSecret)` — скрипт папки Webhooks ставит заголовок сам, если секрет задан.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://127.0.0.1:8000" },
+    { "key": "sku", "value": "STEAM-TOPUP-500" },
+    { "key": "orderId", "value": "" },
+    { "key": "amount", "value": "500" },
+    { "key": "eventId", "value": "evt-demo-1" },
+    { "key": "webhookSecret", "value": "" },
+    { "key": "category", "value": "steam" },
+    { "key": "limit", "value": "50" }
+  ],
+  "item": [
+    {
+      "name": "Happy path",
+      "description": "Прогон в Collection Runner по порядку: создать заказ, оплатить, получить код.",
+      "item": [
+        {
+          "name": "1. Create order",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', () => pm.response.to.have.status(201));",
+                  "const body = pm.response.json();",
+                  "pm.test('created, без кода', () => {",
+                  "  pm.expect(body.status).to.eql('created');",
+                  "  pm.expect(body.code).to.eql(null);",
+                  "  pm.expect(body.id).to.be.a('string');",
+                  "});",
+                  "pm.collectionVariables.set('orderId', body.id);",
+                  "pm.collectionVariables.set('amount', String(body.amount));",
+                  "pm.collectionVariables.set('eventId', 'evt-' + Date.now());"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Accept", "value": "application/json" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sku\": \"{{sku}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{baseUrl}}/api/orders",
+            "description": "`POST /api/orders` — заказ в `created`. Сид: `STEAM-TOPUP-500` (1499), `PSN-20-EUR` (2000)."
+          },
+          "response": [
+            {
+              "name": "201 created",
+              "originalRequest": {
+                "method": "POST",
+                "header": [
+                  { "key": "Content-Type", "value": "application/json" }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"sku\": \"STEAM-TOPUP-500\"\n}"
+                },
+                "url": "{{baseUrl}}/api/orders"
+              },
+              "status": "Created",
+              "code": 201,
+              "_postman_previewlanguage": "json",
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"id\": \"9f1c2a3b-4d5e-6789-abcd-ef0123456789\",\n  \"sku\": \"STEAM-TOPUP-500\",\n  \"status\": \"created\",\n  \"amount_cents\": 1499,\n  \"code\": null,\n  \"provider\": null,\n  \"failure_reason\": null,\n  \"paid_at\": null,\n  \"delivered_at\": null,\n  \"created_at\": \"2026-09-04T08:00:00+00:00\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "2. Pay webhook",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!pm.collectionVariables.get('eventId')) {",
+                  "  pm.collectionVariables.set('eventId', 'evt-' + Date.now());",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('ok, не duplicate', () => {",
+                  "  pm.expect(body.ok).to.eql(true);",
+                  "  pm.expect(body.duplicate).to.eql(false);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Accept", "value": "application/json" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"event_id\": \"{{eventId}}\",\n  \"order_id\": \"{{orderId}}\",\n  \"status\": \"paid\",\n  \"amount\": {{amount}},\n  \"currency\": \"RUB\",\n  \"created_at\": \"2025-01-01T12:00:00Z\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{baseUrl}}/api/webhooks/payment",
+            "description": "`POST /api/webhooks/payment`. `amount_cents` должен совпасть с заказом. При `QUEUE_CONNECTION=sync` выдача происходит в этом же запросе."
+          },
+          "response": [
+            {
+              "name": "200 paid",
+              "originalRequest": {
+                "method": "POST",
+                "header": [{ "key": "Content-Type", "value": "application/json" }],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"event_id\": \"evt-123\",\n  \"order_id\": \"9f1c2a3b-4d5e-6789-abcd-ef0123456789\",\n  \"status\": \"paid\",\n  \"amount\": 500,\n  \"currency\": \"RUB\",\n  \"created_at\": \"2025-01-01T12:00:00Z\"\n}"
+                },
+                "url": "{{baseUrl}}/api/webhooks/payment"
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"ok\": true,\n  \"duplicate\": false\n}"
+            }
+          ]
+        },
+        {
+          "name": "3. Get order (delivered)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('delivered + код', () => {",
+                  "  pm.expect(body.status).to.eql('delivered');",
+                  "  pm.expect(body.code).to.be.a('string').and.to.have.lengthOf.at.least(1);",
+                  "  pm.expect(body.provider).to.be.oneOf(['a', 'b']);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Accept", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/orders/{{orderId}}",
+            "description": "`GET /api/orders/{id}`. После успешной оплаты и выдачи — `code` и `provider`."
+          },
+          "response": [
+            {
+              "name": "200 delivered",
+              "originalRequest": {
+                "method": "GET",
+                "header": [{ "key": "Accept", "value": "application/json" }],
+                "url": "{{baseUrl}}/api/orders/{{orderId}}"
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"id\": \"9f1c2a3b-4d5e-6789-abcd-ef0123456789\",\n  \"sku\": \"STEAM-TOPUP-500\",\n  \"status\": \"delivered\",\n  \"amount_cents\": 1499,\n  \"code\": \"A-XXXX-XXXX-XXXX\",\n  \"provider\": \"a\",\n  \"failure_reason\": null,\n  \"paid_at\": \"2026-09-04T08:00:01+00:00\",\n  \"delivered_at\": \"2026-09-04T08:00:01+00:00\",\n  \"created_at\": \"2026-09-04T08:00:00+00:00\"\n}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Orders",
+      "item": [
+        {
+          "name": "Create order",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created', () => pm.response.to.have.status(201));",
+                  "const body = pm.response.json();",
+                  "pm.collectionVariables.set('orderId', body.id);",
+                  "pm.collectionVariables.set('amount', String(body.amount));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Accept", "value": "application/json" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sku\": \"{{sku}}\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{baseUrl}}/api/orders",
+            "description": "Тело: `{ \"sku\": \"string\" }` (max 64).\n\n- 201 — заказ создан\n- 404 — неизвестный SKU\n- 422 — нет в наличии (`is_available = false`) или валидация"
+          }
+        },
+        {
+          "name": "Create order — unknown SKU",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404 Not Found', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Accept", "value": "application/json" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sku\": \"NO-SUCH\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{baseUrl}}/api/orders"
+          },
+          "response": [
+            {
+              "name": "404 unknown SKU",
+              "originalRequest": {
+                "method": "POST",
+                "header": [{ "key": "Content-Type", "value": "application/json" }],
+                "body": { "mode": "raw", "raw": "{\n  \"sku\": \"NO-SUCH\"\n}" },
+                "url": "{{baseUrl}}/api/orders"
+              },
+              "status": "Not Found",
+              "code": 404,
+              "_postman_previewlanguage": "json",
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"message\": \"No query results for model [App\\\\Models\\\\Product] NO-SUCH\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Get order",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.test('id совпадает', () => {",
+                  "  pm.expect(pm.response.json().id).to.eql(pm.collectionVariables.get('orderId'));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Accept", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/orders/{{orderId}}",
+            "description": "`code` и `provider` заполнены только при `status = delivered`."
+          }
+        },
+        {
+          "name": "Get order — not found",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404 Not Found', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Accept", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/orders/00000000-0000-4000-8000-000000000000"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Webhooks",
+      "description": "Эмуляция эквайера. Если задан `webhookSecret`, pre-request считает HMAC-SHA256 сырого тела и ставит `X-Signature`.",
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const secret = pm.collectionVariables.get('webhookSecret');",
+              "if (!secret) { return; }",
+              "const CryptoJS = require('crypto-js');",
+              "const raw = pm.variables.replaceIn(pm.request.body.raw || '');",
+              "const sig = CryptoJS.HmacSHA256(raw, secret).toString(CryptoJS.enc.Hex);",
+              "pm.request.headers.upsert({ key: 'X-Signature', value: sig });"
+            ]
+          }
+        }
+      ],
+      "item": [
+        {
+          "name": "Payment webhook (paid)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!pm.collectionVariables.get('eventId')) {",
+                  "  pm.collectionVariables.set('eventId', 'evt-' + Date.now());",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.test('ok', () => pm.expect(pm.response.json().ok).to.eql(true));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Accept", "value": "application/json" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"event_id\": \"{{eventId}}\",\n  \"order_id\": \"{{orderId}}\",\n  \"status\": \"paid\",\n  \"amount\": {{amount}},\n  \"currency\": \"RUB\",\n  \"created_at\": \"2025-01-01T12:00:00Z\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{baseUrl}}/api/webhooks/payment",
+            "description": "Поля: `event_id` (string, max 128), `order_id` (uuid), `amount_cents` (int ≥ 1), `status` только `paid`.\n\nПеред вызовом создайте заказ (Orders → Create order), чтобы заполнить `orderId` и `amountCents`."
+          }
+        },
+        {
+          "name": "Payment webhook — duplicate event_id",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('duplicate: true', () => {",
+                  "  pm.expect(body.ok).to.eql(true);",
+                  "  pm.expect(body.duplicate).to.eql(true);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Accept", "value": "application/json" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"event_id\": \"{{eventId}}\",\n  \"order_id\": \"{{orderId}}\",\n  \"status\": \"paid\",\n  \"amount\": {{amount}},\n  \"currency\": \"RUB\",\n  \"created_at\": \"2025-01-01T12:00:00Z\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{baseUrl}}/api/webhooks/payment",
+            "description": "Повтор того же `event_id`: HTTP 200, `duplicate: true`, вторая выдача не создаётся.\nСначала вызовите Payment webhook (paid) с тем же `eventId`."
+          },
+          "response": [
+            {
+              "name": "200 duplicate",
+              "originalRequest": {
+                "method": "POST",
+                "header": [{ "key": "Content-Type", "value": "application/json" }],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"event_id\": \"evt-123\",\n  \"order_id\": \"9f1c2a3b-4d5e-6789-abcd-ef0123456789\",\n  \"status\": \"paid\",\n  \"amount\": 500,\n  \"currency\": \"RUB\",\n  \"created_at\": \"2025-01-01T12:00:00Z\"\n}"
+                },
+                "url": "{{baseUrl}}/api/webhooks/payment"
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"ok\": true,\n  \"duplicate\": true\n}"
+            }
+          ]
+        },
+        {
+          "name": "Payment webhook — amount mismatch",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('422 Unprocessable', () => pm.response.to.have.status(422));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Accept", "value": "application/json" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"event_id\": \"evt-bad-{{$timestamp}}\",\n  \"order_id\": \"{{orderId}}\",\n  \"amount_cents\": 1,\n  \"status\": \"paid\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": "{{baseUrl}}/api/webhooks/payment",
+            "description": "Сумма не совпадает с заказом → 422, событие не пишется, статус остаётся `created`."
+          },
+          "response": [
+            {
+              "name": "422 amount mismatch",
+              "originalRequest": {
+                "method": "POST",
+                "header": [{ "key": "Content-Type", "value": "application/json" }],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"event_id\": \"evt-bad\",\n  \"order_id\": \"9f1c2a3b-4d5e-6789-abcd-ef0123456789\",\n  \"amount_cents\": 1,\n  \"status\": \"paid\"\n}"
+                },
+                "url": "{{baseUrl}}/api/webhooks/payment"
+              },
+              "status": "Unprocessable Entity",
+              "code": 422,
+              "_postman_previewlanguage": "json",
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"message\": \"Amount does not match the order.\",\n  \"errors\": {\n    \"amount_cents\": [\"Amount does not match the order.\"]\n  }\n}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Storefront",
+      "item": [
+        {
+          "name": "List available SKUs",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('категория и items', () => {",
+                  "  pm.expect(body.category).to.eql(pm.collectionVariables.get('category'));",
+                  "  pm.expect(body.items).to.be.an('array');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Accept", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/storefront?category={{category}}&limit={{limit}}",
+            "description": "Горячая витрина: доступные SKU категории, сортировка `sort_rank DESC, id`. Только `is_available = true`."
+          },
+          "response": [
+            {
+              "name": "200 steam",
+              "originalRequest": {
+                "method": "GET",
+                "header": [{ "key": "Accept", "value": "application/json" }],
+                "url": "{{baseUrl}}/api/storefront?category=steam&limit=50"
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"category\": \"steam\",\n  \"items\": [\n    {\n      \"sku\": \"STEAM-TOPUP-500\",\n      \"title\": \"Counter-Strike 2 Prime Key\",\n      \"price_cents\": 1499,\n      \"stock_qty\": 50,\n      \"sort_rank\": 10000\n    }\n  ]\n}"
+            }
+          ]
+        },
+        {
+          "name": "Unknown category",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404 Not Found', () => pm.response.to.have.status(404));",
+                  "pm.test('message', () => pm.expect(pm.response.json().message).to.eql('Unknown category.'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Accept", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/storefront?category=nope"
+          },
+          "response": [
+            {
+              "name": "404 unknown category",
+              "originalRequest": {
+                "method": "GET",
+                "url": "{{baseUrl}}/api/storefront?category=nope"
+              },
+              "status": "Not Found",
+              "code": 404,
+              "_postman_previewlanguage": "json",
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"message\": \"Unknown category.\"\n}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Admin",
+      "item": [
+        {
+          "name": "Reconciliation",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.test('ключи сверки', () => {",
+                  "  pm.expect(body).to.have.keys(",
+                  "    'paid_not_delivered',",
+                  "    'delivered_not_paid',",
+                  "    'ledger_unbalanced',",
+                  "    'stuck',",
+                  "    'ledger_zero_orders'",
+                  "  );",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Accept", "value": "application/json" }],
+            "url": "{{baseUrl}}/api/admin/reconciliation",
+            "description": "Сверка:\n- `paid_not_delivered` — оплачен / fulfilling / failed, кода нет\n- `delivered_not_paid` — выдан, но `paid_at` пуст\n- `ledger_unbalanced` — SUM(amount_cents) ≠ 0 по заказу\n- `stuck` — paid/fulfilling старше `ORDER_STUCK_AFTER_SECONDS`\n- `ledger_zero_orders` — число заказов в ledger"
+          },
+          "response": [
+            {
+              "name": "200 empty",
+              "originalRequest": {
+                "method": "GET",
+                "url": "{{baseUrl}}/api/admin/reconciliation"
+              },
+              "status": "OK",
+              "code": 200,
+              "_postman_previewlanguage": "json",
+              "header": [{ "key": "Content-Type", "value": "application/json" }],
+              "body": "{\n  \"paid_not_delivered\": [],\n  \"delivered_not_paid\": [],\n  \"ledger_unbalanced\": [],\n  \"stuck\": [],\n  \"ledger_zero_orders\": 0\n}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "GET /up",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Accept", "value": "application/json" }],
+            "url": "{{baseUrl}}/up",
+            "description": "Laravel health-check (не под `/api`)."
+          }
+        }
+      ]
+    }
+  ]
+}

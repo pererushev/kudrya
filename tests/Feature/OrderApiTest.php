@@ -11,12 +11,13 @@ class OrderApiTest extends TestCase
     {
         $this->seedProduct();
 
-        $response = $this->postJson('/api/orders', ['sku' => 'STEAM-CS2-KEY']);
+        $response = $this->postJson('/api/orders', ['sku' => 'STEAM-TOPUP-500']);
 
         $response->assertCreated()
-            ->assertJsonPath('sku', 'STEAM-CS2-KEY')
-            ->assertJsonPath('status', OrderStatus::PendingPayment->value)
-            ->assertJsonPath('amount_cents', 1499)
+            ->assertJsonPath('sku', 'STEAM-TOPUP-500')
+            ->assertJsonPath('status', OrderStatus::Created->value)
+            ->assertJsonPath('amount', 500)
+            ->assertJsonPath('amount_cents', 50_000)
             ->assertJsonPath('code', null);
 
         $this->assertDatabaseCount('orders', 1);
@@ -29,20 +30,20 @@ class OrderApiTest extends TestCase
 
     public function test_out_of_stock_returns_422(): void
     {
-        $this->seedProduct(['stock_qty' => 0, 'is_available' => false]);
+        $this->seedProduct(['stock_qty' => 0, 'is_available' => false], 0);
 
-        $this->postJson('/api/orders', ['sku' => 'STEAM-CS2-KEY'])
+        $this->postJson('/api/orders', ['sku' => 'STEAM-TOPUP-500'])
             ->assertStatus(422);
     }
 
     public function test_shows_order_by_id(): void
     {
         $this->seedProduct();
-        $create = $this->postJson('/api/orders', ['sku' => 'STEAM-CS2-KEY'])->json();
+        $create = $this->postJson('/api/orders', ['sku' => 'STEAM-TOPUP-500'])->json();
 
         $this->getJson('/api/orders/'.$create['id'])
             ->assertOk()
             ->assertJsonPath('id', $create['id'])
-            ->assertJsonPath('status', 'pending_payment');
+            ->assertJsonPath('status', 'created');
     }
 }

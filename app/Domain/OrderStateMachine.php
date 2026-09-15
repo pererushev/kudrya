@@ -12,11 +12,17 @@ class OrderStateMachine
      * @var array<string, list<OrderStatus>>
      */
     private const ALLOWED = [
-        OrderStatus::PendingPayment->value => [OrderStatus::Paid],
-        OrderStatus::Paid->value => [OrderStatus::Fulfilling],
-        OrderStatus::Fulfilling->value => [OrderStatus::Delivered, OrderStatus::Failed],
+        OrderStatus::Created->value => [OrderStatus::Paid, OrderStatus::PaymentFailed],
+        OrderStatus::Paid->value => [OrderStatus::Delivering],
+        OrderStatus::Delivering->value => [
+            OrderStatus::Delivered,
+            OrderStatus::OutOfStock,
+            OrderStatus::DeliveryFailed,
+        ],
+        OrderStatus::OutOfStock->value => [OrderStatus::Delivering],
+        OrderStatus::DeliveryFailed->value => [OrderStatus::Delivering],
+        OrderStatus::PaymentFailed->value => [OrderStatus::Paid],
         OrderStatus::Delivered->value => [],
-        OrderStatus::Failed->value => [OrderStatus::Fulfilling],
     ];
 
     public function canTransition(Order $order, OrderStatus $to): bool
@@ -41,9 +47,15 @@ class OrderStateMachine
         match ($to) {
             OrderStatus::Paid => $order->paid_at = now(),
             OrderStatus::Delivered => $order->delivered_at = now(),
-            OrderStatus::Failed => tap($order, function (Order $order) use ($failureReason): void {
+            OrderStatus::PaymentFailed,
+            OrderStatus::OutOfStock,
+            OrderStatus::DeliveryFailed => tap($order, function (Order $order) use ($failureReason): void {
                 $order->failed_at = now();
                 $order->failure_reason = $failureReason;
+            }),
+            OrderStatus::Delivering => tap($order, function (Order $order): void {
+                $order->failure_reason = null;
+                $order->failed_at = null;
             }),
             default => null,
         };

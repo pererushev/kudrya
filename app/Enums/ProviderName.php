@@ -12,8 +12,13 @@ enum ProviderName: string
         return $this === self::A ? self::B : null;
     }
 
+    public function requestId(string $orderId): string
+    {
+        return 'req_'.$orderId.'-'.$this->value;
+    }
+
     public function idempotencyKey(string $orderId): string
     {
-        return $this->value.':'.$orderId;
+        return $this->requestId($orderId);
     }
 }
